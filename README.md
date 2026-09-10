@@ -12,6 +12,11 @@ raise RuntimeError("Unsupported operating system")   # anything but darwin/linux
 The **runtime** package is fine on Windows, though. Only the installer is not. This repo
 is the hand-wired setup that works: a venv, two Docker containers, and one alias file.
 
+- Doing it by hand → read on.
+- Handing it to a coding agent → point it at [`AGENTS.md`](AGENTS.md), the same steps as
+  an executable checklist with a verification gate on each one.
+- Already set up, just want it on or off → [`voice.ps1`](voice.ps1).
+
 No WSL. That is deliberate — VoiceMode's own docs still mark the WSLg PulseAudio mic
 bridge "coming soon", while `sounddevice` on native Windows reaches the mic through
 WASAPI directly.
@@ -166,11 +171,19 @@ curl.exe http://127.0.0.1:8880/v1/audio/voices
 ## 5. Wire it into Claude Code
 
 ```powershell
-claude mcp add --scope user voicemode -- $HOME\voicemode\.venv\Scripts\voicemode.exe
+claude mcp add voicemode --scope user -e PYTHONIOENCODING=utf-8 -- `
+  $HOME\voicemode\.venv\Scripts\voicemode.exe
 ```
 
 `voicemode.exe` with no arguments starts the MCP server on stdio; the subcommands are for
 service management.
+
+`PYTHONIOENCODING=utf-8` is not decoration. VoiceMode prints emoji, Windows hands Python a
+cp1252 stream, and the result is `UnicodeEncodeError: 'charmap' codec can't encode
+character '❌'`. It kills `voicemode service status` outright.
+
+`claude mcp get voicemode` should then report `Status: ✔ Connected`. **Restart Claude Code
+once** — a server registered mid-session is not live until the next start.
 
 Optional — skip the approval prompt on every turn, in `~/.claude/settings.json`:
 
@@ -187,7 +200,32 @@ Then just ask Claude to talk to you.
 **Do not run `/voicemode:install` or the plugin's own installer.** They hit the
 `RuntimeError` above and will not repair anything.
 
-## 6. Config
+## 6. Turning it on and off
+
+There is no VoiceMode skill or plugin to enable. "On" means exactly two things: the MCP
+server is registered, and the two containers are running. [`voice.ps1`](voice.ps1) owns
+the second half.
+
+```powershell
+.\voice.ps1            # status: container state, health, MCP registration
+.\voice.ps1 off        # stop both engines, ~1.5 GB back
+.\voice.ps1 on         # start both, wait until they answer
+```
+
+**Off survives a reboot.** `--restart unless-stopped` means exactly that — Docker restarts
+a container at login *unless a human stopped it on purpose*. So `off` is a real switch,
+not a pause, and there is no scheduled task to disable.
+
+The switch deliberately leaves the MCP server registered, so flipping it never costs you a
+Claude Code restart. The trade-off: with the engines off, Claude still offers voice and
+fails with a connection error if you use it. If you would rather it disappear from Claude
+entirely, `claude mcp remove voicemode -s user` — but that needs a restart each way.
+
+Note that VoiceMode's own `voicemode service start|stop|status` is **not** the switch here.
+It drives launchd/systemd installs of whisper.cpp and kokoro; it has no idea these
+containers exist and reports all four services "not available" no matter what is running.
+
+## 7. Config
 
 `~/.voicemode/voicemode.env` — a big commented template, everything already defaulted
 correctly for this layout. Worth setting:
@@ -240,6 +278,17 @@ connections scanning" removes the whole class of problem if you are allowed to.
 The alias file (step 3). `docker exec voicemode-whisper cat model_aliases.json` should
 show `faster-whisper-small`, not `large-v3`.
 
+### `UnicodeEncodeError: 'charmap' codec can't encode character`
+
+Windows gave Python a cp1252 stream and VoiceMode printed an emoji. Set
+`PYTHONIOENCODING=utf-8` — in the MCP registration (step 5) and in your shell before
+running any `voicemode` subcommand.
+
+### `voicemode service status` says everything is "not available"
+
+Expected, and harmless. That command manages VoiceMode's own launchd/systemd service
+installs, which is not how this setup runs. Use `.\voice.ps1 status` instead.
+
 ### `ModuleNotFoundError: audioop`
 
 Python 3.13 without `audioop-lts`. `pip install audioop-lts`.
@@ -262,6 +311,12 @@ The Whisper model loads lazily on the first request. Subsequent ones are quick.
 ## Layout
 
 ```
+this repo
+├── README.md              # why, and the manual walkthrough
+├── AGENTS.md              # the same steps as an agent checklist, with gates
+├── voice.ps1              # on / off / status
+└── model_aliases.json     # copy to $HOME\voicemode\, mounted into speaches
+
 C:\Users\<you>\voicemode\
 ├── .venv\                 # voice-mode + deps, no simpleaudio
 ├── ffmpeg\                # static build, on the user PATH
