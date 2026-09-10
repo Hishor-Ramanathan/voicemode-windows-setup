@@ -1,7 +1,7 @@
 # VoiceMode on native Windows
 
-[VoiceMode](https://github.com/mbailey/voicemode) gives Claude Code a voice — you talk,
-it talks back. Its README lists "Windows (native or WSL)" as supported, but the official
+[VoiceMode](https://github.com/mbailey/voicemode) gives Claude Code a voice — you talk, it
+talks back. Its README lists "Windows (native or WSL)" as supported, but the official
 installer refuses to run there:
 
 ```python
@@ -9,18 +9,40 @@ installer refuses to run there:
 raise RuntimeError("Unsupported operating system")   # anything but darwin/linux
 ```
 
-The **runtime** package is fine on Windows, though. Only the installer is not. This repo
-is the hand-wired setup that works: a venv, two Docker containers, and one alias file.
+The **runtime** is fine on Windows; only the installer is not. This repo is the hand-wired
+setup that works: a venv, two Docker containers, and one alias file.
 
-- Doing it by hand → read on.
-- Handing it to a coding agent → point it at [`AGENTS.md`](AGENTS.md), the same steps as
-  an executable checklist with a verification gate on each one.
-- Already set up → [`voice.ps1`](voice.ps1): `talk` to get a voice terminal, `off` to stop
-  the engines, no argument for status.
+No WSL, deliberately — VoiceMode's own docs still mark the WSLg PulseAudio mic bridge
+"coming soon", while `sounddevice` on native Windows reaches the mic through WASAPI
+directly.
 
-No WSL. That is deliberate — VoiceMode's own docs still mark the WSLg PulseAudio mic
-bridge "coming soon", while `sounddevice` on native Windows reaches the mic through
-WASAPI directly.
+---
+
+## Start talking
+
+Once it is set up, [`voice.ps1`](voice.ps1) is the entire interface:
+
+```powershell
+voice.ps1 talk     # THIS terminal gets voice. Starts the engines if they are down.
+voice.ps1 off      # engines down, ~1.5 GB back. Stays off across reboots.
+voice.ps1 on       # engines back up
+voice.ps1          # status
+```
+
+`talk` opens a Claude session that **speaks every reply**. There is no skill to enable and
+no phrase to say first. The first reply takes **~8 seconds** before you hear anything —
+Kokoro is slow to its first chunk on CPU, slower when cold.
+
+To move voice to another window, run `talk` there. A terminal started with a plain
+`claude` has no voicemode tools at all and cannot start talking at you. There is no
+mid-session switch: a session's MCP servers are fixed at launch.
+
+**To mute yourself, use the headset's own mute button** — boom arm up, or the button on
+the earcup. Hardware mute cuts the mic below the OS, so nothing running on the machine can
+override it, and it covers every app rather than just this one.
+
+Not set up yet? Point a coding agent at [`AGENTS.md`](AGENTS.md) — the same steps below as
+an executable checklist with a verification gate on each. To do it by hand, read on.
 
 ---
 
@@ -37,26 +59,22 @@ voicemode.exe  ── venv at C:\Users\<you>\voicemode\.venv
     └── TTS  http://127.0.0.1:8880/v1 ──► Docker: kokoro-fastapi (Kokoro-82M)
 ```
 
-Both URLs are VoiceMode's built-in defaults, so once the containers listen on those
-ports there is nothing to configure. Everything runs locally — no OpenAI key, no audio
-leaving the machine.
+Both URLs are VoiceMode's built-in defaults, so once the containers listen on those ports
+there is nothing to configure. Everything runs locally — no OpenAI key, no audio leaving
+the machine.
 
 Verified against: VoiceMode 8.12.0, Python 3.13.14, Windows 11, Docker Desktop.
 
 ---
 
-## Prerequisites
+## Setup
 
-- **Python 3.13** (3.11+ works; 3.13 needs `audioop-lts`, see below)
-- **Docker Desktop** with the WSL2 backend, set to start at login
-- ~4 GB disk for the two images plus the Whisper model
-- A working mic. `Settings → Privacy → Microphone → let desktop apps access` must be on.
+**Prerequisites:** Python 3.13 (3.11+ works), Docker Desktop with the WSL2 backend set to
+start at login, ~4 GB disk, and a working mic with
+`Settings → Privacy → Microphone → let desktop apps access` on. No admin rights needed
+anywhere below.
 
-No admin rights needed anywhere in this guide.
-
----
-
-## 1. The venv
+### 1. The venv
 
 `pip install voice-mode` fails on Windows because of one dependency: **`simpleaudio`**,
 which has no wheels past cp38 and needs a C compiler. It is only a *fallback* playback
@@ -74,41 +92,35 @@ pip install aiohttp audioop-lts click fastmcp httpx keyring numpy openai `
             psutil pydub pyyaml scipy sounddevice uv webrtcvad-wheels
 ```
 
-That is voice-mode's full dependency list minus `simpleaudio`.
+That is voice-mode's full dependency list minus `simpleaudio`. `audioop-lts` matters on
+3.13: the stdlib `audioop` module was removed in that release
+([PEP 594](https://peps.python.org/pep-0594/)) and `pydub` imports it. On 3.12 or older
+you can leave it out.
 
-`audioop-lts` matters on 3.13: the stdlib `audioop` module was removed in that release
-([PEP 594](https://peps.python.org/pep-0594/)), and `pydub` imports it. `audioop-lts` is
-the drop-in replacement. On 3.12 or older you can leave it out.
+Check: `.\.venv\Scripts\voicemode.exe --version`.
 
-Check it imports:
+### 2. ffmpeg
 
-```powershell
-.\.venv\Scripts\voicemode.exe --version
-```
-
-## 2. ffmpeg
-
-`pydub` shells out to ffmpeg for MP3. Grab a static build, unzip it, and put the folder
-on your **user** PATH (no admin, no installer):
+`pydub` shells out to ffmpeg for MP3. Grab a static build, unzip so `ffmpeg.exe` sits in
+`$HOME\voicemode\ffmpeg\`, and put that folder on your **user** PATH:
 
 ```powershell
-# after unzipping the release so that ffmpeg.exe sits in $HOME\voicemode\ffmpeg
 [Environment]::SetEnvironmentVariable(
   "Path",
   [Environment]::GetEnvironmentVariable("Path", "User") + ";$HOME\voicemode\ffmpeg",
   "User")
 ```
 
-Open a new shell, then `ffmpeg -version` should answer.
+Check: `ffmpeg -version` in a **new** shell.
 
-## 3. Speech-to-text — speaches
+### 3. Speech-to-text — speaches
 
 [speaches](https://github.com/speaches-ai/speaches) serves faster-whisper behind an
 OpenAI-compatible `/v1/audio/transcriptions`.
 
 **Download the model on the host first.** The container runs with `HF_HUB_OFFLINE=1`, so
-it never reaches Hugging Face itself — see [Why the model is downloaded on the host](#why-the-model-is-downloaded-on-the-host)
-below.
+it never reaches Hugging Face itself — see
+[Why the model is downloaded on the host](#why-the-model-is-downloaded-on-the-host).
 
 ```powershell
 mkdir $HOME\voicemode\hf-cache
@@ -116,24 +128,12 @@ $env:HF_HUB_CACHE = "$HOME\voicemode\hf-cache"
 .\.venv\Scripts\hf.exe download Systran/faster-whisper-small
 ```
 
-**Fix the model alias.** VoiceMode asks for the model literally named `whisper-1`
-(`STT_MODEL = os.getenv("VOICEMODE_STT_MODEL", "whisper-1")` in `voice_mode/config.py`),
-which is OpenAI's name and means nothing to speaches. speaches resolves it through
-`model_aliases.json` in its working directory — but the file it ships points `whisper-1`
-at `faster-whisper-large-v3`, which you did not download. Mount the copy from this repo
-over it:
-
-```json
-{
-    "tts-1": "speaches-ai/Kokoro-82M-v1.0-ONNX",
-    "tts-1-hd": "speaches-ai/Kokoro-82M-v1.0-ONNX",
-    "whisper-1": "Systran/faster-whisper-small"
-}
-```
-
-Skip this and every transcription fails with a model-not-found — the most confusing
-failure in the whole setup, because the mic works, the request goes out, and nothing
-comes back.
+**Then fix the model alias — this is the step that costs an hour when skipped.** VoiceMode
+asks for a model literally named `whisper-1` (OpenAI's name, meaningless to speaches).
+speaches resolves it through `model_aliases.json` in its working directory, and the file
+it ships points `whisper-1` at `faster-whisper-large-v3` — which you did not download.
+Copy this repo's [`model_aliases.json`](model_aliases.json) to `$HOME\voicemode\` and
+mount it over the image's copy:
 
 ```powershell
 docker run -d --name voicemode-whisper `
@@ -147,7 +147,7 @@ docker run -d --name voicemode-whisper `
 
 Port 2022 on the host, 8000 in the container — 2022 is what VoiceMode expects.
 
-## 4. Text-to-speech — Kokoro
+### 4. Text-to-speech — Kokoro
 
 ```powershell
 docker run -d --name voicemode-kokoro `
@@ -157,10 +157,8 @@ docker run -d --name voicemode-kokoro `
 ```
 
 Nothing to mount: [kokoro-fastapi](https://github.com/remsky/kokoro-FastAPI) bakes the
-model into the image.
-
-`--restart unless-stopped` on both is the autostart story — Docker Desktop starts at
-login, Docker restarts the containers. No systemd, no launchd, no scheduled task.
+model into the image. `--restart unless-stopped` on both containers is the whole autostart
+story — Docker Desktop starts at login and restarts them. No systemd, no scheduled task.
 
 Check both:
 
@@ -169,189 +167,151 @@ curl.exe http://127.0.0.1:2022/v1/models
 curl.exe http://127.0.0.1:8880/v1/audio/voices
 ```
 
-## 5. Wire it into Claude Code
+Kokoro needs ~30s to warm its model before `/health` answers. A connection failure in the
+first half-minute is normal.
 
-Put this repo's folder on your user PATH so `voice.ps1` works from anywhere:
+### 5. Wire it into Claude Code
+
+Put this repo's folder on your user PATH, and that is the wiring done:
 
 ```powershell
 [Environment]::SetEnvironmentVariable("Path",
   [Environment]::GetEnvironmentVariable("Path","User") + ";C:\path\to\this\repo", "User")
 ```
 
-That is the whole wiring. `voice.ps1 talk` builds the MCP config and launches Claude with
-it — see [step 6](#6-choosing-which-terminal-talks) for why voice is opt-in per terminal
-rather than registered globally.
-
-If you would rather have voice in *every* terminal, register it globally instead:
-
-```powershell
-claude mcp add voicemode --scope user -e PYTHONIOENCODING=utf-8 -- `
-  $HOME\voicemode\.venv\Scripts\voicemode.exe
-```
-
-`voicemode.exe` with no arguments starts the MCP server on stdio; the subcommands are for
-service management.
-
-`PYTHONIOENCODING=utf-8` is not decoration in either form. VoiceMode prints emoji, Windows
-hands Python a cp1252 stream, and the result is `UnicodeEncodeError: 'charmap' codec can't
-encode character '❌'`. It kills `voicemode service status` outright.
-
-After a global registration, `claude mcp get voicemode` should report
-`Status: ✔ Connected`, and you must **restart Claude Code once** — a server registered
-mid-session is not live until the next start. `voice.ps1 talk` has no such problem: the
-session is new by definition.
-
-Optional — skip the approval prompt on every turn, in `~/.claude/settings.json`:
+`voice.ps1 talk` builds the MCP config and launches Claude with it. Optionally skip the
+approval prompt on every spoken turn, in `~/.claude/settings.json`:
 
 ```json
-{
-  "permissions": {
-    "allow": ["mcp__voicemode__converse"]
-  }
-}
+{ "permissions": { "allow": ["mcp__voicemode__converse"] } }
 ```
 
 **Do not run `/voicemode:install` or the plugin's own installer.** They hit the
-`RuntimeError` above and will not repair anything.
+`RuntimeError` above and repair nothing.
 
-## 6. Choosing which terminal talks
+### 6. Config (optional)
 
-There is no VoiceMode skill or plugin to enable. Voice is **opt-in per terminal**, and
-[`voice.ps1`](voice.ps1) is the whole interface:
-
-```powershell
-voice.ps1 talk     # engines up if needed, then launch Claude WITH voice, here
-voice.ps1 on       # engines only
-voice.ps1 off      # engines down, ~1.5 GB back
-voice.ps1          # status
-```
-
-A terminal started with a plain `claude` has no voicemode tools at all and cannot start
-talking at you. A terminal started with `voice.ps1 talk` does. To move voice to a
-different window, run `talk` there — that is the entire switching mechanism, and it costs
-**zero tokens**, because it is a shell launcher the model is never asked about.
-
-This works because `--mcp-config` *merges* a server into a session rather than replacing
-your config, so the voice terminal keeps Supabase, Gmail and everything else. The config
-file is generated into `$HOME\voicemode\` on each run rather than committed — it holds an
-absolute path to your venv, which is nobody else's path.
-
-For this to be opt-in, voicemode must **not** be registered globally:
-
-```powershell
-claude mcp remove voicemode -s user     # if you followed step 5
-```
-
-`voice.ps1 status` warns you if it finds a global registration, since that quietly gives
-every terminal voice and defeats the launcher.
-
-There is no mid-session switch. A session's MCP servers are fixed at launch, so voice
-cannot be flipped on in an already-running terminal — open a new one.
-
-**Off survives a reboot.** `--restart unless-stopped` means exactly that — Docker restarts
-a container at login *unless a human stopped it on purpose*. So `off` is a real switch,
-not a pause, and there is no scheduled task to disable.
-
-### If you run two voice terminals anyway
-
-VoiceMode ships a single-speaker lock called **the conch**, on by default, state in
-`~/.voicemode/conch`. One session holds the floor on a 10s renewing lease and the rest
-queue; an MCP `converse` call waits up to 25s for its turn
-(`VOICEMODE_CONCH_MCP_WAIT_CAP`) before giving up.
-
-```powershell
-voicemode conch status     # who holds it, who is queued
-voicemode conch bump       # drop the holder, promote the next waiter
-voicemode conch release    # force-clear a stuck lock
-```
-
-`conch give <session>` only resolves terminals **already in the waiter queue** here. Its
-"summon an idle session" path shells out to a `session` binary that is not part of this
-setup, and degrades silently to "not waiting".
-
-Note that VoiceMode's own `voicemode service start|stop|status` is **not** the switch here.
-It drives launchd/systemd installs of whisper.cpp and kokoro; it has no idea these
-containers exist and reports all four services "not available" no matter what is running.
-`voicemode reconnect` is likewise tmux-only — exit code 13 outside a pane.
-
-### Is it listening all the time?
-
-No, and this is checkable rather than a promise:
-
-- `sd.rec` and `sd.InputStream` appear in **exactly one file** in the package,
-  `voice_mode/tools/converse.py`. The mic opens when a converse turn starts listening and
-  closes when that turn ends. There is no wake-word listener and no background stream.
-  `grep -rn "sd\.rec(\|InputStream" voice_mode/` is the whole audit.
-- `~/.voicemode/audio/` and `~/.voicemode/transcriptions/` stay empty unless you turn
-  saving on. Nothing is kept by default.
-- Speech goes to your own containers on 127.0.0.1. Nothing leaves the machine, and with no
-  `OPENAI_API_KEY` set there is no cloud fallback to leak into.
-
-The mic is genuinely open for the few seconds after Claude speaks, while it waits for your
-reply. If you want a hard guarantee for that window, use your headset's **hardware mute** —
-a boom-arm-up or mute button cuts the mic below the OS, so nothing running on the machine
-can override it, and it covers every app rather than just this one. That beats any script
-this repo could ship.
-
-To stop Claude mid-sentence and drop back to text instead, that is
-`voicemode control stop`, which needs `VOICEMODE_CONTROL_CHANNEL_ENABLED=true`. It mutes
-Claude, not you.
-
-### What voice costs in tokens
-
-Measured against this setup, not estimated:
-
-| | tokens | when |
-|---|---|---|
-| `converse` + `pause_conversation` schemas | ~4,300 | **once**, first use, in that session only |
-| server instructions injected into the system prompt | 0 | never — VoiceMode sends none |
-| registered but unused | ~10 | per request, just the tool names |
-| switching terminals | 0 | never |
-
-Claude Code **defers MCP tool schemas** — they are listed by name and only loaded when a
-`ToolSearch` pulls them in. So the ~4.3k sits outside your context until you actually
-speak, and there is no per-request tax for having voice available.
-
-`voice.ps1` passes `--tools-enabled converse`, which drops the `service` tool for another
-~320 tokens. The container management it would do is what `voice.ps1` is for.
-
-The recurring cost is the obvious one: every spoken exchange puts its transcript in
-context, exactly like typing it.
-
-## 7. Config
-
-`~/.voicemode/voicemode.env` — a big commented template, everything already defaulted
-correctly for this layout. Worth setting:
+`~/.voicemode/voicemode.env` is a big commented template, already defaulted correctly for
+this layout. Worth setting:
 
 ```ini
 VOICEMODE_VOICES=af_sky
 VOICEMODE_WHISPER_LANGUAGE=en
 ```
 
-Pinning the language skips Whisper's language-detection pass, which is both faster and
-stops it guessing wrong on short utterances.
+Pinning the language skips Whisper's detection pass — faster, and it stops guessing wrong
+on short utterances. The base URLs need no entry.
 
-The base URLs need no entry — `voice_mode/config.py` already defaults to
-`http://127.0.0.1:2022/v1` and `http://127.0.0.1:8880/v1`, each with the OpenAI API as a
-fallback if the local service is down.
+---
+
+## Why it is per-terminal
+
+`--mcp-config` *merges* a server into one session rather than replacing your config, so a
+voice terminal keeps Supabase, Gmail and everything else. The config file is generated
+into `$HOME\voicemode\` on each run rather than committed — it holds an absolute path to
+your venv, which is nobody else's path.
+
+For this to stay opt-in, voicemode must **not** be registered globally. `voice.ps1 status`
+warns you if it finds one; `claude mcp remove voicemode -s user` clears it.
+
+If you do run two voice terminals, VoiceMode's single-speaker lock (**the conch**, state in
+`~/.voicemode/conch`) queues them: one holds the floor on a 10s renewing lease, others wait
+up to 25s. `voicemode conch status | bump | release` inspects and clears it.
+
+Note that `voicemode service start|stop|status` is **not** the switch here — it drives
+launchd/systemd installs of whisper.cpp and kokoro, has no idea these containers exist, and
+reports everything "not available" no matter what is running.
+
+## Is it listening all the time?
+
+No, and it is checkable rather than a promise:
+
+- `sd.rec` and `sd.InputStream` appear in **exactly one file** in the package,
+  `voice_mode/tools/converse.py`. The mic opens when a turn starts listening and closes
+  when it ends — no wake-word listener, no background stream.
+  `grep -rn "sd\.rec(\|InputStream" voice_mode/` is the whole audit.
+- `~/.voicemode/audio/` and `~/.voicemode/transcriptions/` stay empty unless you turn
+  saving on.
+- Speech goes to your own containers on 127.0.0.1, and with no `OPENAI_API_KEY` set there
+  is no cloud fallback to leak into.
+
+The mic is genuinely open for the few seconds after Claude speaks, while it waits for your
+reply. That window is what the headset's hardware mute covers.
+
+## What voice costs in tokens
+
+Measured against this setup, not estimated:
+
+| | tokens | when |
+|---|---|---|
+| `converse` + `pause_conversation` schemas | ~4,300 | **once**, first use, that session only |
+| server instructions injected into the system prompt | 0 | never — VoiceMode sends none |
+| registered but unused | ~10 | per request, just the tool names |
+| switching terminals | 0 | never |
+
+Claude Code **defers MCP tool schemas** — they are listed by name and only loaded when a
+`ToolSearch` pulls them in, so the ~4.3k sits outside your context until you actually
+speak. `voice.ps1` also passes `--tools-enabled converse`, dropping the `service` tool for
+another ~320. The recurring cost is the obvious one: every spoken exchange puts its
+transcript in context, exactly like typing it.
 
 ---
 
 ## Troubleshooting
 
+### It speaks, but never hears you
+
+Check the headset first — a muted or quiet mic is the likeliest cause and the easiest to
+miss, because nothing errors. The signature, in `~/.voicemode/logs/conversations/`:
+
+```
+"type": "stt", "text": "[no speech detected]"
+"type": "stt", "text": "through"          # one word from 38 seconds of audio
+```
+
+Boom arm down, mute off, then `mmsys.cpl` → Recording → your headset → Properties →
+Levels → push the mic to 100. VoiceMode gates recordings through webrtcvad at aggressiveness
+3, its strictest setting, so a quiet speaker is trimmed to silence before whisper sees the
+audio. If the level is right and it still clips you, relax the gate in `voicemode.env`:
+`VOICEMODE_VAD_AGGRESSIVENESS=2`.
+
+### Claude opened but never says anything
+
+`converse` is a **tool, not a mode**, and Claude Code defers MCP tool schemas — so a
+session that was told none of this just answers in text: every container healthy, every
+check green, not one word spoken. `voice.ps1 talk` handles it with
+`--append-system-prompt`. If you started `claude` by hand, you have to ask: "talk to me out
+loud."
+
+To tell "never asked" from "actually broken", check whether anything reached the engines:
+
+```powershell
+docker logs --since 20m voicemode-kokoro  | Select-String "speech"
+docker logs --since 20m voicemode-whisper | Select-String "transcriptions"
+```
+
+No lines means the tool was never called, so look at the session, not the stack. To test
+the stack alone: `voicemode converse --skip-stt "testing the speak path"`.
+
+### `voice.ps1 : The term 'voice.ps1' is not recognized`
+
+A stale shell. PATH changes only reach **new processes**, and the trap is that a new
+Windows Terminal *tab* inherits from the Terminal process, which is still the old one — a
+new tab is not a new environment. Close Windows Terminal completely and reopen, or refresh
+in place:
+
+```powershell
+$env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
+            [Environment]::GetEnvironmentVariable("Path","User")
+```
+
 ### Why the model is downloaded on the host
 
-If HTTPS on your machine is intercepted by security software (Norton, Zscaler, a
-corporate proxy — anything re-signing traffic with its own CA), containers and Python
-both fail with:
-
-```
-CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate
-```
-
-Windows trusts the interception CA; Python does not, because it uses `certifi`'s bundle
-rather than the OS store. A working `curl` proves nothing here — Git Bash's curl has its
-own bundle behaviour and often succeeds where Python fails.
+If HTTPS on your machine is intercepted by security software (Norton, Zscaler, a corporate
+proxy — anything re-signing traffic with its own CA), containers and Python both fail with
+`CERTIFICATE_VERIFY_FAILED`. Windows trusts the interception CA; Python does not, because
+it uses `certifi`'s bundle rather than the OS store. A working `curl` proves nothing —
+Git Bash's curl has its own bundle behaviour and often succeeds where Python fails.
 
 Downloading on the host and bind-mounting the cache with `HF_HUB_OFFLINE=1` sidesteps it
 for the container. If the host download also fails:
@@ -361,108 +321,21 @@ pip install truststore
 python -c "import truststore; truststore.inject_into_ssl(); from huggingface_hub import snapshot_download; snapshot_download('Systran/faster-whisper-small')"
 ```
 
-[`truststore`](https://truststore.readthedocs.io/) makes Python use the Windows
-certificate store, which *does* trust the interception CA. That keeps verification on —
-prefer it over `--trusted-host` or disabling TLS checks. Turning off the AV's "encrypted
-connections scanning" removes the whole class of problem if you are allowed to.
+[`truststore`](https://truststore.readthedocs.io/) makes Python use the Windows certificate
+store, which *does* trust the interception CA. That keeps verification on — prefer it over
+`--trusted-host` or disabling TLS checks.
 
-### Transcription returns nothing / model not found
+### Everything else
 
-The alias file (step 3). `docker exec voicemode-whisper cat model_aliases.json` should
-show `faster-whisper-small`, not `large-v3`.
-
-### `voice.ps1 : The term 'voice.ps1' is not recognized`
-
-A stale shell. PATH changes only reach **new processes**, and the trap is that a new
-Windows Terminal *tab* inherits from the Terminal process, which is still the old one — a
-new tab is not a new environment. Close Windows Terminal completely and reopen, or refresh
-the current window in place:
-
-```powershell
-$env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
-            [Environment]::GetEnvironmentVariable("Path","User")
-```
-
-### Claude opened but never says anything
-
-Loading the MCP server is not enough. `converse` is a **tool, not a mode**, and Claude
-Code defers MCP tool schemas — the model gets a name and nothing else until it looks the
-schema up. A session that was told none of this simply answers in text: every container
-healthy, every gate green, not one word spoken.
-
-`voice.ps1 talk` handles it with `--append-system-prompt`, so it speaks from the first
-turn. If you start `claude` by hand instead, you have to ask: "talk to me out loud."
-
-To tell "never asked" apart from "actually broken", check whether anything ever reached
-the engines:
-
-```powershell
-docker logs --since 20m voicemode-kokoro  | Select-String "speech"
-docker logs --since 20m voicemode-whisper | Select-String "transcriptions"
-```
-
-No lines means the tool was never called, so look at the session, not the stack. To test
-the stack on its own, bypassing Claude entirely:
-
-```powershell
-voicemode converse --skip-stt "testing the speak path"
-```
-
-Expect roughly 8 seconds before the first sound — Kokoro on CPU is slow to first chunk,
-slower still when cold. And check where the audio is going: `sounddevice.query_devices()`
-reports the default output, which on a machine with a Bluetooth headset is the headset,
-not the laptop speakers.
-
-### It speaks, but never hears you
-
-Check the headset before anything else — a muted or quiet mic is the likeliest cause and
-the easiest to miss, because nothing errors. VoiceMode records, whisper answers, and the
-transcript comes back empty.
-
-The signature, in `~/.voicemode/logs/conversations/`:
-
-```
-"type": "stt", "text": "[no speech detected]"
-"type": "stt", "text": "through"          # one word from 38 seconds of audio
-```
-
-Boom arm down, mute button off, then `mmsys.cpl` → Recording → your headset → Properties
-→ Levels → push the mic to 100. VoiceMode gates recordings through webrtcvad at
-aggressiveness 3, its strictest setting, so a quiet speaker gets trimmed to silence before
-whisper ever sees the audio. If the level is right and it still clips you, relax the gate
-in `~/.voicemode/voicemode.env`:
-
-```ini
-VOICEMODE_VAD_AGGRESSIVENESS=2
-```
-
-### `UnicodeEncodeError: 'charmap' codec can't encode character`
-
-Windows gave Python a cp1252 stream and VoiceMode printed an emoji. Set
-`PYTHONIOENCODING=utf-8` — in the MCP registration (step 5) and in your shell before
-running any `voicemode` subcommand.
-
-### `voicemode service status` says everything is "not available"
-
-Expected, and harmless. That command manages VoiceMode's own launchd/systemd service
-installs, which is not how this setup runs. Use `.\voice.ps1 status` instead.
-
-### `ModuleNotFoundError: audioop`
-
-Python 3.13 without `audioop-lts`. `pip install audioop-lts`.
-
-### Wheel build fails for simpleaudio
-
-You dropped the `--no-deps`. Step 1.
-
-### No microphone
-
-`python -c "import sounddevice; print(sounddevice.query_devices())"` in the venv. Empty
-or missing input device means the Windows mic privacy setting, not VoiceMode.
-
-### First response is slow
-
-The Whisper model loads lazily on the first request. Subsequent ones are quick.
+| Symptom | Cause |
+|---|---|
+| Transcription returns nothing / model not found | The alias file, step 3. `docker exec voicemode-whisper cat model_aliases.json` should show `faster-whisper-small`. |
+| `UnicodeEncodeError: 'charmap' codec` | Windows gave Python a cp1252 stream and VoiceMode printed an emoji. Set `PYTHONIOENCODING=utf-8` in your shell before any `voicemode` subcommand. |
+| `ModuleNotFoundError: audioop` | Python 3.13 without `audioop-lts`. `pip install audioop-lts`. |
+| Wheel build fails for `simpleaudio` | You dropped the `--no-deps`. Step 1. |
+| No microphone | `python -c "import sounddevice; print(sounddevice.query_devices())"` in the venv. Empty means the Windows mic privacy setting, not VoiceMode. |
+| `voicemode service status` says "not available" | Expected. Wrong tool for this setup — use `voice.ps1 status`. |
+| First response is slow | The Whisper model loads lazily on first request. |
 
 ---
 
@@ -475,20 +348,9 @@ this repo
 ├── voice.ps1              # talk / on / off / status  (put this folder on PATH)
 └── model_aliases.json     # copy to $HOME\voicemode\, mounted into speaches
 
-C:\Users\<you>\voicemode\
-├── .venv\                 # voice-mode + deps, no simpleaudio
-├── ffmpeg\                # static build, on the user PATH
-├── hf-cache\              # HF hub cache, bind-mounted into speaches
-└── model_aliases.json     # whisper-1 → faster-whisper-small
-
-├── voicemode.mcp.json     # generated by voice.ps1 talk, not committed
-
-C:\Users\<you>\.voicemode\
-├── voicemode.env          # config
-├── conch                  # the single-speaker lock
-├── audio\                 # recordings
-├── transcriptions\
-└── logs\
+C:\Users\<you>\voicemode\  # .venv, ffmpeg, hf-cache, model_aliases.json
+                           # + voicemode.mcp.json, generated by talk, not committed
+C:\Users\<you>\.voicemode\ # voicemode.env, conch, audio\, transcriptions\, logs\
 ```
 
 ## Credits
