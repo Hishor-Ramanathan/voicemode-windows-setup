@@ -15,7 +15,8 @@ is the hand-wired setup that works: a venv, two Docker containers, and one alias
 - Doing it by hand → read on.
 - Handing it to a coding agent → point it at [`AGENTS.md`](AGENTS.md), the same steps as
   an executable checklist with a verification gate on each one.
-- Already set up, just want it on or off → [`voice.ps1`](voice.ps1).
+- Already set up → [`voice.ps1`](voice.ps1): `talk` to get a voice terminal, `off` to stop
+  the engines, no argument for status.
 
 No WSL. That is deliberate — VoiceMode's own docs still mark the WSLg PulseAudio mic
 bridge "coming soon", while `sounddevice` on native Windows reaches the mic through
@@ -170,6 +171,19 @@ curl.exe http://127.0.0.1:8880/v1/audio/voices
 
 ## 5. Wire it into Claude Code
 
+Put this repo's folder on your user PATH so `voice.ps1` works from anywhere:
+
+```powershell
+[Environment]::SetEnvironmentVariable("Path",
+  [Environment]::GetEnvironmentVariable("Path","User") + ";C:\path\to\this\repo", "User")
+```
+
+That is the whole wiring. `voice.ps1 talk` builds the MCP config and launches Claude with
+it — see [step 6](#6-choosing-which-terminal-talks) for why voice is opt-in per terminal
+rather than registered globally.
+
+If you would rather have voice in *every* terminal, register it globally instead:
+
 ```powershell
 claude mcp add voicemode --scope user -e PYTHONIOENCODING=utf-8 -- `
   $HOME\voicemode\.venv\Scripts\voicemode.exe
@@ -178,52 +192,108 @@ claude mcp add voicemode --scope user -e PYTHONIOENCODING=utf-8 -- `
 `voicemode.exe` with no arguments starts the MCP server on stdio; the subcommands are for
 service management.
 
-`PYTHONIOENCODING=utf-8` is not decoration. VoiceMode prints emoji, Windows hands Python a
-cp1252 stream, and the result is `UnicodeEncodeError: 'charmap' codec can't encode
-character '❌'`. It kills `voicemode service status` outright.
+`PYTHONIOENCODING=utf-8` is not decoration in either form. VoiceMode prints emoji, Windows
+hands Python a cp1252 stream, and the result is `UnicodeEncodeError: 'charmap' codec can't
+encode character '❌'`. It kills `voicemode service status` outright.
 
-`claude mcp get voicemode` should then report `Status: ✔ Connected`. **Restart Claude Code
-once** — a server registered mid-session is not live until the next start.
+After a global registration, `claude mcp get voicemode` should report
+`Status: ✔ Connected`, and you must **restart Claude Code once** — a server registered
+mid-session is not live until the next start. `voice.ps1 talk` has no such problem: the
+session is new by definition.
 
 Optional — skip the approval prompt on every turn, in `~/.claude/settings.json`:
 
 ```json
 {
   "permissions": {
-    "allow": ["mcp__voicemode__converse", "mcp__voicemode__service"]
+    "allow": ["mcp__voicemode__converse"]
   }
 }
 ```
 
-Then just ask Claude to talk to you.
-
 **Do not run `/voicemode:install` or the plugin's own installer.** They hit the
 `RuntimeError` above and will not repair anything.
 
-## 6. Turning it on and off
+## 6. Choosing which terminal talks
 
-There is no VoiceMode skill or plugin to enable. "On" means exactly two things: the MCP
-server is registered, and the two containers are running. [`voice.ps1`](voice.ps1) owns
-the second half.
+There is no VoiceMode skill or plugin to enable. Voice is **opt-in per terminal**, and
+[`voice.ps1`](voice.ps1) is the whole interface:
 
 ```powershell
-.\voice.ps1            # status: container state, health, MCP registration
-.\voice.ps1 off        # stop both engines, ~1.5 GB back
-.\voice.ps1 on         # start both, wait until they answer
+voice.ps1 talk     # engines up if needed, then launch Claude WITH voice, here
+voice.ps1 on       # engines only
+voice.ps1 off      # engines down, ~1.5 GB back
+voice.ps1          # status
 ```
+
+A terminal started with a plain `claude` has no voicemode tools at all and cannot start
+talking at you. A terminal started with `voice.ps1 talk` does. To move voice to a
+different window, run `talk` there — that is the entire switching mechanism, and it costs
+**zero tokens**, because it is a shell launcher the model is never asked about.
+
+This works because `--mcp-config` *merges* a server into a session rather than replacing
+your config, so the voice terminal keeps Supabase, Gmail and everything else. The config
+file is generated into `$HOME\voicemode\` on each run rather than committed — it holds an
+absolute path to your venv, which is nobody else's path.
+
+For this to be opt-in, voicemode must **not** be registered globally:
+
+```powershell
+claude mcp remove voicemode -s user     # if you followed step 5
+```
+
+`voice.ps1 status` warns you if it finds a global registration, since that quietly gives
+every terminal voice and defeats the launcher.
+
+There is no mid-session switch. A session's MCP servers are fixed at launch, so voice
+cannot be flipped on in an already-running terminal — open a new one.
 
 **Off survives a reboot.** `--restart unless-stopped` means exactly that — Docker restarts
 a container at login *unless a human stopped it on purpose*. So `off` is a real switch,
 not a pause, and there is no scheduled task to disable.
 
-The switch deliberately leaves the MCP server registered, so flipping it never costs you a
-Claude Code restart. The trade-off: with the engines off, Claude still offers voice and
-fails with a connection error if you use it. If you would rather it disappear from Claude
-entirely, `claude mcp remove voicemode -s user` — but that needs a restart each way.
+### If you run two voice terminals anyway
+
+VoiceMode ships a single-speaker lock called **the conch**, on by default, state in
+`~/.voicemode/conch`. One session holds the floor on a 10s renewing lease and the rest
+queue; an MCP `converse` call waits up to 25s for its turn
+(`VOICEMODE_CONCH_MCP_WAIT_CAP`) before giving up.
+
+```powershell
+voicemode conch status     # who holds it, who is queued
+voicemode conch bump       # drop the holder, promote the next waiter
+voicemode conch release    # force-clear a stuck lock
+```
+
+`conch give <session>` only resolves terminals **already in the waiter queue** here. Its
+"summon an idle session" path shells out to a `session` binary that is not part of this
+setup, and degrades silently to "not waiting".
 
 Note that VoiceMode's own `voicemode service start|stop|status` is **not** the switch here.
 It drives launchd/systemd installs of whisper.cpp and kokoro; it has no idea these
 containers exist and reports all four services "not available" no matter what is running.
+`voicemode reconnect` is likewise tmux-only — exit code 13 outside a pane.
+
+### What voice costs in tokens
+
+Measured against this setup, not estimated:
+
+| | tokens | when |
+|---|---|---|
+| `converse` + `pause_conversation` schemas | ~4,300 | **once**, first use, in that session only |
+| server instructions injected into the system prompt | 0 | never — VoiceMode sends none |
+| registered but unused | ~10 | per request, just the tool names |
+| switching terminals | 0 | never |
+
+Claude Code **defers MCP tool schemas** — they are listed by name and only loaded when a
+`ToolSearch` pulls them in. So the ~4.3k sits outside your context until you actually
+speak, and there is no per-request tax for having voice available.
+
+`voice.ps1` passes `--tools-enabled converse`, which drops the `service` tool for another
+~320 tokens. The container management it would do is what `voice.ps1` is for.
+
+The recurring cost is the obvious one: every spoken exchange puts its transcript in
+context, exactly like typing it.
 
 ## 7. Config
 
@@ -314,7 +384,7 @@ The Whisper model loads lazily on the first request. Subsequent ones are quick.
 this repo
 ├── README.md              # why, and the manual walkthrough
 ├── AGENTS.md              # the same steps as an agent checklist, with gates
-├── voice.ps1              # on / off / status
+├── voice.ps1              # talk / on / off / status  (put this folder on PATH)
 └── model_aliases.json     # copy to $HOME\voicemode\, mounted into speaches
 
 C:\Users\<you>\voicemode\
@@ -323,8 +393,11 @@ C:\Users\<you>\voicemode\
 ├── hf-cache\              # HF hub cache, bind-mounted into speaches
 └── model_aliases.json     # whisper-1 → faster-whisper-small
 
+├── voicemode.mcp.json     # generated by voice.ps1 talk, not committed
+
 C:\Users\<you>\.voicemode\
 ├── voicemode.env          # config
+├── conch                  # the single-speaker lock
 ├── audio\                 # recordings
 ├── transcriptions\
 └── logs\

@@ -1,29 +1,38 @@
 <#
 .SYNOPSIS
-    Turn the local VoiceMode engines on or off.
+    Everything voice, under one word.
 
 .DESCRIPTION
-    Starts and stops the two Docker containers that VoiceMode talks to.
-    "off" survives a reboot: both containers run with --restart unless-stopped,
-    which Docker reads as "restart it unless a human stopped it on purpose".
+    talk    Launch Claude Code in THIS terminal with voice, engines first.
+    on      Start the two engine containers.
+    off     Stop them. Survives a reboot.
+    status  Who is running, who is healthy, is the launcher wired up.
 
-    This does not touch the MCP server registration, so flipping the switch
-    never costs you a Claude Code restart. With the engines off, asking Claude
-    for voice fails with a connection error rather than falling back to a cloud
-    service.
+    Voice is opt-in per terminal: `talk` merges the voicemode MCP server into
+    that one session only. Terminals started with a plain `claude` have no
+    voice and cannot start talking at you.
+
+    Switching which terminal has voice costs nothing - this is a shell
+    launcher, the model is never asked.
 
 .EXAMPLE
-    .\voice.ps1 on
-    .\voice.ps1 off
-    .\voice.ps1            # same as: .\voice.ps1 status
+    voice.ps1 talk
+    voice.ps1 off
+    voice.ps1
 #>
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('on', 'off', 'status')]
+    [ValidateSet('talk', 'on', 'off', 'status')]
     [string]$Action = 'status'
 )
+# No pass-through to claude on purpose: PowerShell binds a bare -p to its own
+# -PipelineVariable before this script ever sees it. Need flags? Run
+# `voice.ps1 on`, then claude yourself with the config path status prints.
 
 $ErrorActionPreference = 'Stop'
+
+$VoiceHome = Join-Path $HOME 'voicemode'
+$VoicemodeExe = Join-Path $VoiceHome '.venv\Scripts\voicemode.exe'
 
 $Services = @(
     [pscustomobject]@{ Name = 'voicemode-whisper'; Role = 'STT'; Health = 'http://127.0.0.1:2022/health' }
@@ -51,11 +60,46 @@ function Wait-Healthy($Service, [int]$TimeoutSeconds = 120) {
     return $false
 }
 
-function Test-McpRegistered {
-    try {
-        claude mcp get voicemode *>$null
-        return $?
-    } catch { return $false }   # claude not on PATH
+function Start-Engines {
+    foreach ($service in $Services) {
+        if (-not (Get-ContainerState $service.Name)) {
+            Write-Error "$($service.Name) does not exist. This is the switch, not the setup - see AGENTS.md."
+        }
+        docker start $service.Name | Out-Null
+    }
+    $allReady = $true
+    foreach ($service in $Services) {
+        if (Wait-Healthy $service) {
+            Write-Host "$($service.Name) ready" -ForegroundColor Green
+        } else {
+            Write-Host "$($service.Name) started but not answering - docker logs $($service.Name)" -ForegroundColor Yellow
+            $allReady = $false
+        }
+    }
+    return $allReady
+}
+
+# Generated, never committed: it holds an absolute path to this machine's venv,
+# which is nobody else's path. Rewritten every call so it cannot go stale.
+# WriteAllText to avoid the BOM that Set-Content -Encoding utf8 adds in PS 5.1.
+function New-McpConfig {
+    if (-not (Test-Path $VoicemodeExe)) {
+        Write-Error "$VoicemodeExe not found. Run the setup first - see AGENTS.md."
+    }
+    $path = Join-Path $VoiceHome 'voicemode.mcp.json'
+    $config = @{
+        mcpServers = @{
+            voicemode = @{
+                # --tools-enabled drops the `service` tool: ~320 tokens we never
+                # need, since this script manages the containers.
+                command = $VoicemodeExe.Replace('\', '/')
+                args    = @('--tools-enabled', 'converse')
+                env     = @{ PYTHONIOENCODING = 'utf-8' }
+            }
+        }
+    }
+    [System.IO.File]::WriteAllText($path, ($config | ConvertTo-Json -Depth 6))
+    return $path
 }
 
 function Show-Status {
@@ -65,36 +109,45 @@ function Show-Status {
         $health = if (Test-Healthy $service.Health) { 'healthy' } else { '-' }
         '{0,-20} {1,-5} {2,-12} {3}' -f $service.Name, $service.Role, $state, $health
     }
-    $mcp = if (Test-McpRegistered) { 'registered (run: claude mcp get voicemode)' }
-           else { 'NOT registered - run: claude mcp add voicemode --scope user -e PYTHONIOENCODING=utf-8 -- $HOME\voicemode\.venv\Scripts\voicemode.exe' }
-    '{0,-20} {1,-5} {2}' -f 'mcp server', '', $mcp
+    $launcher = if (Test-Path $VoicemodeExe) { 'ready - run: voice.ps1 talk' }
+                else { "NOT installed ($VoicemodeExe missing) - see AGENTS.md" }
+    '{0,-20} {1,-5} {2}' -f 'launcher', '', $launcher
+    '{0,-20} {1,-5} {2}' -f 'mcp config', '', (Join-Path $VoiceHome 'voicemode.mcp.json')
+
+    # Voice everywhere defeats the point of the launcher, so say so.
+    # $LASTEXITCODE, not $?: PS 5.1 wraps a native command's stderr in an
+    # ErrorRecord, which $ErrorActionPreference='Stop' would turn terminating.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    claude mcp get voicemode 2>&1 | Out-Null
+    $registeredGlobally = ($LASTEXITCODE -eq 0)
+    $ErrorActionPreference = $prev
+
+    if ($registeredGlobally) {
+        Write-Host ''
+        Write-Host 'Note: voicemode is also registered globally, so every terminal has voice.' -ForegroundColor Yellow
+        Write-Host 'To make it opt-in only:  claude mcp remove voicemode -s user' -ForegroundColor Yellow
+    }
 }
 
 switch ($Action) {
-    'on' {
-        foreach ($service in $Services) {
-            if (-not (Get-ContainerState $service.Name)) {
-                Write-Error "$($service.Name) does not exist. This is the switch, not the setup - see AGENTS.md."
-            }
-            docker start $service.Name | Out-Null
+    'talk' {
+        if (-not (Start-Engines)) {
+            Write-Host 'Engines are not answering; starting anyway - voice will fail until they do.' -ForegroundColor Yellow
         }
-        foreach ($service in $Services) {
-            if (Wait-Healthy $service) {
-                Write-Host "$($service.Name) ready" -ForegroundColor Green
-            } else {
-                Write-Host "$($service.Name) started but not answering - docker logs $($service.Name)" -ForegroundColor Yellow
-            }
-        }
-        if (-not (Test-McpRegistered)) {
-            Write-Host 'Engines are up but the MCP server is not registered - Claude cannot see them yet.' -ForegroundColor Yellow
-            Write-Host 'See step 5 in README.md.' -ForegroundColor Yellow
-        }
+        $config = New-McpConfig
+        Write-Host 'Voice is on in this terminal only.' -ForegroundColor Green
+        claude --mcp-config $config
     }
+
+    'on' { Start-Engines | Out-Null }
 
     'off' {
         docker stop @($Services.Name) | Out-Null
-        Write-Host 'Voice off. Stays off across reboots until: .\voice.ps1 on' -ForegroundColor Green
+        Write-Host 'Voice off. Stays off across reboots until: voice.ps1 on' -ForegroundColor Green
     }
 
-    'status' { Show-Status }
+    # exit 0 explicitly: the `claude mcp get` probe above leaves a non-zero
+    # $LASTEXITCODE behind whenever voice is correctly NOT registered globally.
+    'status' { Show-Status; exit 0 }
 }

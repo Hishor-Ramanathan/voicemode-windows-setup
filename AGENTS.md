@@ -118,7 +118,26 @@ Kokoro needs ~30s to warm its model on CPU before `/health` answers. A connectio
 failure in the first half-minute is normal; check `docker logs voicemode-kokoro` for
 `Application startup complete` before treating it as broken.
 
-## Step 6 — Register with Claude Code
+## Step 6 — Wire it into Claude Code
+
+Voice is **opt-in per terminal**. Do **not** register voicemode globally unless the user
+explicitly asks for voice in every terminal — a global registration silently gives every
+session voice and defeats `voice.ps1 talk`.
+
+Put this repo's folder on the user PATH:
+
+```powershell
+$repo = "<absolute path to this repo>"
+$userPath = [Environment]::GetEnvironmentVariable("Path","User")
+if ($userPath -split ';' -notcontains $repo) {
+    [Environment]::SetEnvironmentVariable("Path", ($userPath.TrimEnd(';') + ";$repo"), "User")
+}
+```
+
+**Gate:** in a **new** shell, `Get-Command voice.ps1` resolves to the repo copy. The shell
+you ran the command in will not see the change.
+
+Only if the user asked for voice in *every* terminal, register it globally instead:
 
 ```powershell
 claude mcp add voicemode --scope user -e PYTHONIOENCODING=utf-8 -- `
@@ -129,9 +148,10 @@ claude mcp add voicemode --scope user -e PYTHONIOENCODING=utf-8 -- `
 console encoding is cp1252, and the result is `UnicodeEncodeError: 'charmap' codec can't
 encode character '\u274c'`.
 
-**Gate:** `claude mcp get voicemode` reports `Status: ✔ Connected`. Then tell the user to
-**restart Claude Code once** — a newly registered server is not live in an already-running
-session.
+**Gate for the global path only:** `claude mcp get voicemode` reports
+`Status: ✔ Connected`, and you tell the user to **restart Claude Code once** — a newly
+registered server is not live in an already-running session. `voice.ps1 talk` never needs
+this, since the session it starts is new by definition.
 
 ## Step 7 — Config
 
@@ -146,11 +166,16 @@ Leave the base URLs alone; VoiceMode already defaults to ports 2022 and 8880.
 
 ## Done when
 
+In a new shell:
+
 ```powershell
-.\voice.ps1 status
+voice.ps1 status
 ```
 
-prints `running` + `healthy` for both containers and `registered` for the MCP server.
+prints `running` + `healthy` for both containers and `ready` for the launcher, with **no**
+warning about a global registration. Then `voice.ps1 talk` opens a Claude session that has
+`mcp__voicemode__converse`, while a plain `claude` in another terminal has no voicemode
+tools at all. Check both — the second half is the point of the design.
 
 ## What you did NOT set up
 
@@ -160,3 +185,5 @@ prints `running` + `healthy` for both containers and `registered` for the MCP se
   together.
 - Any autostart task. `--restart unless-stopped` plus Docker Desktop starting at login
   covers it.
+- `voicemode.mcp.json`. `voice.ps1 talk` generates it into `$HOME\voicemode\` on every run,
+  because it embeds an absolute path to this machine's venv. Do not commit one.
