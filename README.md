@@ -385,18 +385,13 @@ $env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
 
 ### Claude opened but never says anything
 
-This was the real bug, and it lived in `voice.ps1`, not in the stack.
-
 Loading the MCP server is not enough. `converse` is a **tool, not a mode**, and Claude
 Code defers MCP tool schemas — the model gets a name and nothing else until it looks the
-schema up. A session nobody told any of this to just answers in text, and the headset
-stays silent. Every container healthy, every gate green, and not one word spoken.
+schema up. A session that was told none of this simply answers in text: every container
+healthy, every gate green, not one word spoken.
 
-`voice.ps1 talk` now passes `--append-system-prompt`, telling the session to load the
-schema once and speak every reply after that. Nothing to enable, nothing to say first —
-it talks from the first turn.
-
-If you start `claude` by hand instead, you have to ask: "talk to me out loud."
+`voice.ps1 talk` handles it with `--append-system-prompt`, so it speaks from the first
+turn. If you start `claude` by hand instead, you have to ask: "talk to me out loud."
 
 To tell "never asked" apart from "actually broken", check whether anything ever reached
 the engines:
@@ -417,6 +412,29 @@ Expect roughly 8 seconds before the first sound — Kokoro on CPU is slow to fir
 slower still when cold. And check where the audio is going: `sounddevice.query_devices()`
 reports the default output, which on a machine with a Bluetooth headset is the headset,
 not the laptop speakers.
+
+### It speaks, but never hears you
+
+Check the headset before anything else — a muted or quiet mic is the likeliest cause and
+the easiest to miss, because nothing errors. VoiceMode records, whisper answers, and the
+transcript comes back empty.
+
+The signature, in `~/.voicemode/logs/conversations/`:
+
+```
+"type": "stt", "text": "[no speech detected]"
+"type": "stt", "text": "through"          # one word from 38 seconds of audio
+```
+
+Boom arm down, mute button off, then `mmsys.cpl` → Recording → your headset → Properties
+→ Levels → push the mic to 100. VoiceMode gates recordings through webrtcvad at
+aggressiveness 3, its strictest setting, so a quiet speaker gets trimmed to silence before
+whisper ever sees the audio. If the level is right and it still clips you, relax the gate
+in `~/.voicemode/voicemode.env`:
+
+```ini
+VOICEMODE_VAD_AGGRESSIVENESS=2
+```
 
 ### `UnicodeEncodeError: 'charmap' codec can't encode character`
 
