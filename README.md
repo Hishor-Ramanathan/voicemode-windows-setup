@@ -274,6 +274,29 @@ It drives launchd/systemd installs of whisper.cpp and kokoro; it has no idea the
 containers exist and reports all four services "not available" no matter what is running.
 `voicemode reconnect` is likewise tmux-only — exit code 13 outside a pane.
 
+### Is it listening all the time?
+
+No, and this is checkable rather than a promise:
+
+- `sd.rec` and `sd.InputStream` appear in **exactly one file** in the package,
+  `voice_mode/tools/converse.py`. The mic opens when a converse turn starts listening and
+  closes when that turn ends. There is no wake-word listener and no background stream.
+  `grep -rn "sd\.rec(\|InputStream" voice_mode/` is the whole audit.
+- `~/.voicemode/audio/` and `~/.voicemode/transcriptions/` stay empty unless you turn
+  saving on. Nothing is kept by default.
+- Speech goes to your own containers on 127.0.0.1. Nothing leaves the machine, and with no
+  `OPENAI_API_KEY` set there is no cloud fallback to leak into.
+
+The mic is genuinely open for the few seconds after Claude speaks, while it waits for your
+reply. If you want a hard guarantee for that window, use your headset's **hardware mute** —
+a boom-arm-up or mute button cuts the mic below the OS, so nothing running on the machine
+can override it, and it covers every app rather than just this one. That beats any script
+this repo could ship.
+
+To stop Claude mid-sentence and drop back to text instead, that is
+`voicemode control stop`, which needs `VOICEMODE_CONTROL_CHANNEL_ENABLED=true`. It mutes
+Claude, not you.
+
 ### What voice costs in tokens
 
 Measured against this setup, not estimated:
@@ -347,6 +370,44 @@ connections scanning" removes the whole class of problem if you are allowed to.
 
 The alias file (step 3). `docker exec voicemode-whisper cat model_aliases.json` should
 show `faster-whisper-small`, not `large-v3`.
+
+### `voice.ps1 : The term 'voice.ps1' is not recognized`
+
+A stale shell. PATH changes only reach **new processes**, and the trap is that a new
+Windows Terminal *tab* inherits from the Terminal process, which is still the old one — a
+new tab is not a new environment. Close Windows Terminal completely and reopen, or refresh
+the current window in place:
+
+```powershell
+$env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
+            [Environment]::GetEnvironmentVariable("Path","User")
+```
+
+### Claude opened but never says anything
+
+Expected, if you did not ask. Voice is not a mode the session enters — `converse` is a
+tool, and Claude calls it when you ask it to. Say "talk to me out loud". The schema is
+deferred until then, which is also why it costs nothing to sit unused.
+
+To tell the difference between "not asked" and "actually broken", check whether anything
+ever reached the engines:
+
+```powershell
+docker logs --since 20m voicemode-kokoro  | Select-String "speech"
+docker logs --since 20m voicemode-whisper | Select-String "transcriptions"
+```
+
+No lines means the tool was never called, so look at the session, not the stack. To test
+the stack on its own, bypassing Claude entirely:
+
+```powershell
+voicemode converse --skip-stt "testing the speak path"
+```
+
+Expect roughly 8 seconds before the first sound — Kokoro on CPU is slow to first chunk,
+slower still when cold. And check where the audio is going: `sounddevice.query_devices()`
+reports the default output, which on a machine with a Bluetooth headset is the headset,
+not the laptop speakers.
 
 ### `UnicodeEncodeError: 'charmap' codec can't encode character`
 
