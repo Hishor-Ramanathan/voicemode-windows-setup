@@ -177,6 +177,11 @@ warning about a global registration. Then `voice.ps1 talk` opens a Claude sessio
 `mcp__voicemode__converse`, while a plain `claude` in another terminal has no voicemode
 tools at all. Check both — the second half is the point of the design.
 
+**Then prove it speaks**, because a loaded server that never talks looks identical to a
+broken one. Say anything in that session; the reply should come out of the speakers within
+~8s. If it does not, confirm the launcher is still passing `--append-system-prompt` — that
+flag, not the MCP registration, is what makes the model call `converse` instead of typing.
+
 ## What you did NOT set up
 
 - `voicemode service start|stop|status` — VoiceMode's own service manager drives

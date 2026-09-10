@@ -385,12 +385,21 @@ $env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
 
 ### Claude opened but never says anything
 
-Expected, if you did not ask. Voice is not a mode the session enters — `converse` is a
-tool, and Claude calls it when you ask it to. Say "talk to me out loud". The schema is
-deferred until then, which is also why it costs nothing to sit unused.
+This was the real bug, and it lived in `voice.ps1`, not in the stack.
 
-To tell the difference between "not asked" and "actually broken", check whether anything
-ever reached the engines:
+Loading the MCP server is not enough. `converse` is a **tool, not a mode**, and Claude
+Code defers MCP tool schemas — the model gets a name and nothing else until it looks the
+schema up. A session nobody told any of this to just answers in text, and the headset
+stays silent. Every container healthy, every gate green, and not one word spoken.
+
+`voice.ps1 talk` now passes `--append-system-prompt`, telling the session to load the
+schema once and speak every reply after that. Nothing to enable, nothing to say first —
+it talks from the first turn.
+
+If you start `claude` by hand instead, you have to ask: "talk to me out loud."
+
+To tell "never asked" apart from "actually broken", check whether anything ever reached
+the engines:
 
 ```powershell
 docker logs --since 20m voicemode-kokoro  | Select-String "speech"

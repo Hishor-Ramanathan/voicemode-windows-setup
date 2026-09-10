@@ -102,6 +102,19 @@ function New-McpConfig {
     return $path
 }
 
+# Loading the server is not enough. `converse` is a tool, not a mode, and Claude
+# Code defers MCP tool schemas - so an unprompted session answers in text and the
+# headset stays silent. That silence is what "voice mode doesn't work" actually is.
+# One line, no newlines: PS 5.1 mangles multi-line strings passed to native exes.
+$VoicePrompt = @(
+    'This session is voice-first. The user is wearing a headset and expects to hear you, not read you.'
+    'At session start, load the schema once: ToolSearch with query select:mcp__voicemode__converse.'
+    'Then answer every turn by calling mcp__voicemode__converse with your reply as message.'
+    'wait_for_response true when you need an answer back, false when you are only reporting progress.'
+    'Speak two or three sentences; leave the detail in the terminal.'
+    'If converse errors, say so in text and carry on - never just go quiet.'
+) -join ' '
+
 function Show-Status {
     foreach ($service in $Services) {
         $state = Get-ContainerState $service.Name
@@ -136,8 +149,8 @@ switch ($Action) {
             Write-Host 'Engines are not answering; starting anyway - voice will fail until they do.' -ForegroundColor Yellow
         }
         $config = New-McpConfig
-        Write-Host 'Voice is on in this terminal only.' -ForegroundColor Green
-        claude --mcp-config $config
+        Write-Host 'Voice is on in this terminal only. First reply takes ~8s to speak.' -ForegroundColor Green
+        claude --mcp-config $config --append-system-prompt $VoicePrompt
     }
 
     'on' { Start-Engines | Out-Null }
